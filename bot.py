@@ -10,7 +10,7 @@ import re
 # ============================================================
 
 # KEEP YOUR EXISTING TOKEN LINE HERE.
-TOKEN = "MTU0Mzg4NDQxOTI0NzUxMzY3MA.G_3Bj0.LB39zSWCAW-K4T50YtgoCceclXyhPdn2zoxtVg"
+TOKEN = os.getenv("TOKEN")
 
 
 # ============================================================
