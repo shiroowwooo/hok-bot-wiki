@@ -1,17 +1,30 @@
 import os
+import re
+import json
+import shutil
+from urllib.parse import quote
+
 import discord
 from discord.ext import commands
 import aiohttp
 from bs4 import BeautifulSoup
-from urllib.parse import quote, urlsplit, urlunsplit, unquote
-import re
+
 
 # ============================================================
-# TOKEN
+# CONFIG
 # ============================================================
 
-# KEEP YOUR EXISTING TOKEN LINE HERE.
-TOKEN = os.getenv("TOKEN")
+TOKEN = ("MTU0NDcyMzI3Mzk2MTQzOTIzMg.GxRpgR.AN7C7AyiuxwmPaxM11-OlInZW4v3yiv1651Png")
+
+HEROES_FILE = "heroes.json"
+
+TENCENT_HERO_LIST = (
+    "https://pvp.qq.com/web201605/js/herolist.json"
+)
+
+FANDOM_API = (
+    "https://honor-of-kings.fandom.com/api.php"
+)
 
 
 # ============================================================
@@ -27,242 +40,529 @@ bot = commands.Bot(
 
 
 # ============================================================
-# WIKI
+# LOAD HERO DATABASE
 # ============================================================
 
-WIKI_URL = "https://honor-of-kings.fandom.com/wiki/"
+def load_heroes():
+    try:
+        with open(
+            HEROES_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+            data = json.load(file)
 
+        return data.get("heroes", [])
+
+    except Exception as error:
+        print(f"Failed to load heroes.json: {error}")
+        return []
+
+
+heroes = load_heroes()
+
+
+# ============================================================
+# FIND HERO
+# ============================================================
+
+def find_hero(hero_name):
+    if not hero_name:
+        return None
+
+    search = hero_name.strip().lower()
+
+    # Exact Global name
+    for hero in heroes:
+        if hero.get("global", "").lower() == search:
+            return hero
+
+    # Exact Chinese name
+    for hero in heroes:
+        if hero.get("cn", "").lower() == search:
+            return hero
+
+    # Aliases
+    for hero in heroes:
+
+        aliases = hero.get("aliases", [])
+
+        if isinstance(aliases, str):
+            aliases = [aliases]
+
+        for alias in aliases:
+            if alias.lower() == search:
+                return hero
+
+    # Partial Global name
+    for hero in heroes:
+        global_name = hero.get(
+            "global",
+            ""
+        ).lower()
+
+        if search in global_name:
+            return hero
+
+    # Partial Chinese name
+    for hero in heroes:
+        cn_name = hero.get(
+            "cn",
+            ""
+        ).lower()
+
+        if search in cn_name:
+            return hero
+
+    return None
+
+
+# ============================================================
+# TENCENT SKIN UPDATE
+# ============================================================
+
+async def update_skins():
+
+    print("Updating Tencent skins...")
+
+    try:
+
+        if not os.path.exists(HEROES_FILE):
+            print("heroes.json not found.")
+            return
+
+        # Backup before updating
+        shutil.copy2(
+            HEROES_FILE,
+            "heroes_backup.json"
+        )
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        timeout = aiohttp.ClientTimeout(
+            total=60
+        )
+
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers
+        ) as session:
+
+            async with session.get(
+                TENCENT_HERO_LIST
+            ) as response:
+
+                if response.status != 200:
+                    print(
+                        f"Tencent request failed: "
+                        f"HTTP {response.status}"
+                    )
+                    return
+
+                tencent_data = await response.json(
+                    content_type=None
+                )
+
+        updated = 0
+
+        # Build Chinese-name lookup
+        tencent_by_cn = {}
+
+        for item in tencent_data:
+
+            cn_name = item.get(
+                "cname",
+                ""
+            ).strip()
+
+            if cn_name:
+                tencent_by_cn[cn_name] = item
+
+        for hero in heroes:
+
+            cn_name = hero.get(
+                "cn",
+                ""
+            ).strip()
+
+            if not cn_name:
+                continue
+
+            tencent_hero = tencent_by_cn.get(
+                cn_name
+            )
+
+            if not tencent_hero:
+                print(
+                    f"No Tencent match: {cn_name}"
+                )
+                continue
+
+            hero_id = tencent_hero.get(
+                "ename"
+            )
+
+            skin_name = tencent_hero.get(
+                "skin_name",
+                ""
+            )
+
+            if not hero_id:
+                continue
+
+            skin_names = [
+                name.strip()
+                for name in skin_name.split("|")
+                if name.strip()
+            ]
+
+            skins = []
+
+            for index, skin in enumerate(
+                skin_names,
+                start=1
+            ):
+
+                image_url = (
+                    "https://game.gtimg.cn/images/"
+                    f"yxzj/img201606/skin/"
+                    f"hero-info/{hero_id}/"
+                    f"{hero_id}-bigskin-{index}.jpg"
+                )
+
+                skins.append({
+                    "cn": skin,
+                    "image": image_url
+                })
+
+            if skins:
+
+                hero["skins"] = skins
+
+                updated += 1
+
+                print(
+                    f"Updated {cn_name}: "
+                    f"{len(skins)} skins"
+                )
+
+        with open(
+            HEROES_FILE,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                {
+                    "heroes": heroes
+                },
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        print(
+            f"Tencent skin update complete. "
+            f"{updated} heroes updated."
+        )
+
+    except Exception as error:
+
+        print(
+            f"Tencent skin update failed: {error}"
+        )
+
+        print(
+            "Your previous heroes.json backup "
+            "was preserved."
+        )
+
+
+# ============================================================
+# FANDOM WIKI PAGE
+# ============================================================
 
 async def get_hero_page(hero_name):
 
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent":
+            "HOK-Wiki-Discord-Bot/1.0"
     }
 
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(
+        total=30
+    )
 
     async with aiohttp.ClientSession(
         timeout=timeout,
         headers=headers
     ) as session:
 
-        # Search the Fandom wiki
-        search_url = (
-            "https://honor-of-kings.fandom.com/"
-            "api.php"
-        )
+        # ----------------------------------------------------
+        # SEARCH WIKI
+        # ----------------------------------------------------
 
-        params = {
+        search_params = {
             "action": "query",
             "list": "search",
             "srsearch": hero_name,
             "format": "json",
-            "srlimit": 10
+            "srlimit": 5
         }
 
-        async with session.get(
-            search_url,
-            params=params
-        ) as response:
+        try:
 
-            if response.status != 200:
-                print(
-                    f"Search failed: HTTP {response.status}"
-                )
-                return None
+            async with session.get(
+                FANDOM_API,
+                params=search_params
+            ) as response:
 
-            search_data = await response.json()
+                if response.status != 200:
+                    print(
+                        f"Wiki search failed: "
+                        f"HTTP {response.status}"
+                    )
+                    return None
 
-        results = search_data.get(
-            "query",
-            {}
-        ).get(
-            "search",
-            []
+                search_data = await response.json()
+
+        except Exception as error:
+
+            print(
+                f"Wiki search error: {error}"
+            )
+
+            return None
+
+        results = (
+            search_data
+            .get("query", {})
+            .get("search", [])
         )
 
         if not results:
+
             print(
                 f"No wiki results for {hero_name}"
             )
+
             return None
 
-        # Find the closest page
         page_title = results[0]["title"]
 
         print(
             f"Wiki page found: {page_title}"
         )
 
-        # Get the actual page
-        page_url = (
-            "https://honor-of-kings.fandom.com/wiki/"
-            + quote(
-                page_title.replace(" ", "_")
+        # ----------------------------------------------------
+        # GET PAGE HTML
+        # ----------------------------------------------------
+
+        page_params = {
+            "action": "parse",
+            "page": page_title,
+            "prop": "text",
+            "format": "json"
+        }
+
+        try:
+
+            async with session.get(
+                FANDOM_API,
+                params=page_params
+            ) as response:
+
+                if response.status != 200:
+                    print(
+                        f"Wiki page failed: "
+                        f"HTTP {response.status}"
+                    )
+                    return None
+
+                page_data = await response.json()
+
+        except Exception as error:
+
+            print(
+                f"Wiki page error: {error}"
+            )
+
+            return None
+
+        if "parse" not in page_data:
+
+            print(
+                "Wiki API did not return page content."
+            )
+
+            return None
+
+        return (
+            page_data["parse"]
+            ["text"]["*"]
+        )
+
+
+# ============================================================
+# CLEAN TEXT
+# ============================================================
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    text = text.replace(
+        "[edit]",
+        ""
+    )
+
+    text = text.replace(
+        "[ ]",
+        ""
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# GET SECTION
+# ============================================================
+
+def get_section(
+    soup,
+    section_name
+):
+
+    headings = soup.find_all(
+        ["h2", "h3"]
+    )
+
+    start = None
+
+    for heading in headings:
+
+        title = clean_text(
+            heading.get_text(
+                " ",
+                strip=True
             )
         )
 
-        async with session.get(
-            page_url
-        ) as response:
+        if (
+            title.lower()
+            == section_name.lower()
+        ):
 
-            if response.status != 200:
-                print(
-                    f"Page failed: HTTP {response.status}"
-                )
-                return None
+            start = heading
+            break
 
-            return await response.text()
-async def get_hero_page(hero_name):
-
-    # your get_hero_page code
-    # ...
-    return html
-async def get_skin_images(hero_name):
-    html = await get_hero_page(hero_name)
-
-    if not html:
+    if not start:
         return []
 
-    import re
-    from urllib.parse import unquote, quote
+    content = []
 
-    images = []
+    for element in start.find_all_next():
 
-    # Find actual Fandom gallery images
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
+        # Stop at next major section
+        if element.name == "h2":
 
-    # Only collect images from the Wiki gallery
-    for link in soup.select("a.image.lightbox"):
+            title = clean_text(
+                element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
 
-        img = link.find("img")
+            if (
+                title.lower()
+                != section_name.lower()
+            ):
+                break
 
-        if not img:
-            continue
+        if element.name in [
+            "p",
+            "li"
+        ]:
 
-        filename = (
-            img.get("data-image-key")
-            or img.get("data-image-name")
-        )
+            text = clean_text(
+                element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
 
-        if not filename:
-            continue
+            if not text:
+                continue
 
-        filename = unquote(filename)
+            if text.lower() in [
+                "contents",
+                "background",
+                "lore",
+                "skills",
+                "skins",
+                "strategies"
+            ]:
+                continue
 
-        # Ignore numbered skill images
-        name_without_ext = filename.rsplit(".", 1)[0]
+            content.append(text)
 
-        if name_without_ext.isdigit():
-            continue
+    return content
 
-        lower_name = filename.lower()
 
-        # Ignore non-skin files
-        if any(word in lower_name for word in [
-            "skill",
-            "ability",
-            "spell",
-            "talent",
-            "starstone",
-            "token",
-            "icon",
-            "portrait",
-            "avatar"
-        ]):
-            continue
+# ============================================================
+# LORE
+# ============================================================
 
-        src = (
-            img.get("data-src")
-            or img.get("data-original")
-            or img.get("src")
-        )
-
-        if not src:
-            continue
-
-        # Ignore lazy-loading placeholder
-        if src.startswith("data:image"):
-            continue
-
-        if src.startswith("//"):
-            src = "https:" + src
-
-        # Remove thumbnail size
-        parts = urlsplit(src)
-        clean_path = parts.path
-
-        if "/revision/latest/" in clean_path:
-            clean_path = clean_path.split(
-                "/revision/latest/"
-            )[0] + "/revision/latest"
-
-        src = urlunsplit((
-            parts.scheme,
-            parts.netloc,
-            clean_path,
-            "",
-            ""
-        ))
-
-        if src not in images:
-            images.append(src)        # Build the Wiki file URL
-        wiki_url = (
-            "https://honor-of-kings.fandom.com/wiki/"
-            + quote(hero_name.replace(" ", "_"))
-            + "?file="
-            + quote(filename)
-        )
-
-        # Find the actual static image URL associated with this filename
-        escaped_filename = re.escape(filename)
-
-        pattern = (
-            r'https?://static\.wikia\.nocookie\.net/'
-            r'honor-of-kings/images/[^"\'<> ]+'
-            + escaped_filename
-        )
-
-        result = re.search(
-            pattern,
-            html,
-            re.IGNORECASE
-        )
-
-        if result:
-            src = result.group(0)
-
-            # Remove thumbnail resizing
-            if "/revision/latest/" in src:
-                src = src.split(
-                    "/revision/latest/"
-                )[0] + "/revision/latest"
-
-            if src not in images:
-                images.append(src)
-
-    print(
-        f"Found {len(images)} skin images for {hero_name}"
-    )
-
-    return images
 def get_lore(soup):
 
-    # Get all text paragraphs from the page
+    # First try the actual Lore section
+    section = get_section(
+        soup,
+        "Lore"
+    )
+
+    if section:
+        return section
+
+    # Fallback to GitHub bot's paragraph detection
     paragraphs = soup.find_all("p")
 
     content = []
 
     started = False
 
-    for p in paragraphs:
+    story_words = [
+        "born",
+        "grew up",
+        "raised",
+        "young",
+        "childhood",
+        "family",
+        "clan",
+        "village",
+        "kingdom",
+        "war",
+        "life",
+        "past",
+        "story"
+    ]
 
-        text = p.get_text(
-            " ",
-            strip=True
+    for paragraph in paragraphs:
+
+        text = clean_text(
+            paragraph.get_text(
+                " ",
+                strip=True
+            )
         )
 
         if not text:
@@ -270,45 +570,13 @@ def get_lore(soup):
 
         lower = text.lower()
 
-        # Skip the short hero introduction
-        if "hero in honor of kings" in lower:
+        if (
+            "hero in honor of kings"
+            in lower
+        ):
             continue
 
-        # Skip obvious navigation/description text
-        if lower in [
-            "contents",
-            "background",
-            "lore",
-            "skills",
-            "skins",
-            "strategies"
-        ]:
-            continue
-
-        # Detect the beginning of the actual story.
-        #
-        # The first real lore paragraph normally contains
-        # words describing the hero's background/story.
-        #
-        # We use several possible indicators so this works
-        # across different heroes.
         if not started:
-
-            story_words = [
-                "born",
-                "grew up",
-                "raised",
-                "young",
-                "childhood",
-                "family",
-                "clan",
-                "village",
-                "kingdom",
-                "war",
-                "life",
-                "past",
-                "story"
-            ]
 
             if any(
                 word in lower
@@ -321,7 +589,6 @@ def get_lore(soup):
 
         content.append(text)
 
-    # Remove anything that clearly belongs to Skills
     cleaned = []
 
     for text in content:
@@ -347,288 +614,182 @@ def get_lore(soup):
 
         cleaned.append(text)
 
-    print(
-        f"Found {len(cleaned)} lore paragraphs"
-    )
-
     return cleaned
+
+
+# ============================================================
+# STRATEGIES
+# ============================================================
+
 def get_strategies(soup):
 
-    strategies_heading = None
-
-    # Find the Strategies heading
-    for heading in soup.find_all(["h2", "h3"]):
-
-        headline = heading.find(
-            class_="mw-headline"
-        )
-
-        if headline:
-            title = headline.get_text(
-                " ",
-                strip=True
-            )
-        else:
-            title = heading.get_text(
-                " ",
-                strip=True
-            )
-
-        if title.lower().strip() == "strategies":
-            strategies_heading = heading
-            break
-
-    if not strategies_heading:
-        print("Strategies heading not found")
-        return []
-
-    content = []
-
-    for element in strategies_heading.find_all_next():
-
-        if element.name == "h2":
-
-            headline = element.find(
-                class_="mw-headline"
-            )
-
-            if headline:
-
-                title = headline.get_text(
-                    " ",
-                    strip=True
-                ).lower()
-
-                if title != "strategies":
-                    break
-
-        if element.name in ["p", "li"]:
-
-            text = clean_text(
-                element.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            if not text:
-                continue
-
-            if text.lower() in [
-                "strategies",
-                "contents",
-                "skins",
-                "skills",
-                "lore"
-            ]:
-                continue
-
-            content.append(text)
-
-    print(
-        f"Found {len(content)} strategy lines"
+    strategies = get_section(
+        soup,
+        "Strategies"
     )
 
-    return content
-async def get_hero_data(hero_name):
+    if strategies:
+        return strategies
 
-    html = await get_hero_page(hero_name)
+    return []
 
-    if not html:
-        return None
+
+# ============================================================
+# SKILLS
+# ============================================================
+
+async def get_skills(
+    hero_name,
+    html
+):
 
     soup = BeautifulSoup(
         html,
         "html.parser"
     )
-    data = {
 
-        "background": get_section(
-            soup,
-            "Background"
-        ),
+    skills = []
 
-        "lore": get_lore(
-            soup
-        ),
+    skills_heading = None
 
-        "skills": await get_skills(
-            hero_name,
-            html
-        ),
-
-        "skins": get_section(
-            soup,
-            "Skins"
-        ),
-
-        "skin_images": await get_skin_images(
-            hero_name
-        ),
-
-        "strategies": get_strategies(
-            soup
-        )
-    }
-
-    return data
-    data = {
-        "background": get_section(
-            soup,
-            "Background"
-        ),
-
-        "lore": get_lore(
-            soup
-        ),
-
-        "skills": await get_skills(
-            hero_name,
-            html
-        ),
-        "skins": get_section(
-            soup,
-            "Skins"
-        ),
-
-        "skin_images": await get_skin_images(
-            hero_name
-        ),
-
-        "strategies": get_section(
-            soup,
-            "Strategies"
-        )
-    }
-
-    return data
-
-# ============================================================
-# CLEAN WIKI TEXT
-# ============================================================
-
-def clean_text(text):
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    text = text.replace(
-        "[edit]",
-        ""
-    )
-
-    text = text.replace(
-        "[]",
-        ""
-    )
-
-    return text.strip()
-
-
-# ============================================================
-# FIND SECTION
-# ============================================================
-
-def get_hero_details(soup):
-
-    details = {}
-
-    # Find the text containing the hero information
-    text = soup.get_text(
-        "\n",
-        strip=True
-    )
-
-    fields = [
-        "Species",
-        "Height",
-        "Region",
-        "Location",
-        "Faction",
-        "Background",
-        "Skillset"
-    ]
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    for i, line in enumerate(lines):
-
-        if line in fields and i + 1 < len(lines):
-
-            value = lines[i + 1]
-
-            # Don't accidentally use another field as the value
-            if value not in fields:
-                details[line] = value
-
-    return details
-def get_section(soup, section_name):
-
-    # Find headings such as:
-    # Background
-    # Lore
-    # Skills
-    # Skins
-    # Strategies
-
-    headings = soup.find_all(
+    # Find Skills heading
+    for heading in soup.find_all(
         ["h2", "h3"]
-    )
-
-    start = None
-
-    for heading in headings:
+    ):
 
         title = clean_text(
-            heading.get_text(" ", strip=True)
+            heading.get_text(
+                " ",
+                strip=True
+            )
         )
 
-        title = title.replace(
-            "[edit]",
-            ""
-        )
+        if (
+            title.lower()
+            == "skills"
+        ):
 
-        if title.lower() == section_name.lower():
-
-            start = heading
+            skills_heading = heading
             break
 
-    if not start:
-        return None
+    if not skills_heading:
 
-    content = []
+        print(
+            "Skills heading not found"
+        )
 
-    for element in start.find_all_next():
+        return []
 
-        if element == start:
-            continue
+    current_skill = None
 
-        if element.name in ["h2", "h3"]:
+    for element in (
+        skills_heading.find_all_next()
+    ):
 
-            heading_text = clean_text(
+        # ----------------------------------------------------
+        # STOP AT NEXT SECTION
+        # ----------------------------------------------------
+
+        if element.name == "h2":
+
+            title = clean_text(
+                element.get_text(
+                    " ",
+                    strip=True
+                )
+            ).lower()
+
+            if title != "skills":
+                break
+
+        # ----------------------------------------------------
+        # SKILL NAME
+        # ----------------------------------------------------
+
+        if element.name == "h3":
+
+            name = clean_text(
                 element.get_text(
                     " ",
                     strip=True
                 )
             )
 
-            if heading_text.lower() != section_name.lower():
+            if not name:
+                continue
 
-                # Stop at next major section.
-                if element.name == "h2":
-                    break
+            if current_skill:
 
-        if element.name in [
-            "p",
-            "li"
-        ]:
+                skills.append(
+                    current_skill
+                )
+
+            current_skill = {
+                "name": name,
+                "description": "",
+                "image": None
+            }
+
+            continue
+
+        # ----------------------------------------------------
+        # SKILL IMAGE
+        # ----------------------------------------------------
+
+        if (
+            element.name == "img"
+            and current_skill
+        ):
+
+            src = (
+                element.get("data-src")
+                or element.get("src")
+            )
+
+            if not src:
+                continue
+
+            if src.startswith("//"):
+                src = "https:" + src
+
+            filename = (
+                src.split("/")[-1]
+                .split("?")[0]
+            )
+
+            name_without_ext = (
+                filename.rsplit(
+                    ".",
+                    1
+                )[0]
+            )
+
+            if name_without_ext.isdigit():
+
+                if (
+                    "/revision/latest/"
+                    in src
+                ):
+
+                    src = (
+                        src.split(
+                            "/revision/latest/"
+                        )[0]
+                        + "/revision/latest"
+                    )
+
+                current_skill[
+                    "image"
+                ] = src
+
+        # ----------------------------------------------------
+        # SKILL DESCRIPTION
+        # ----------------------------------------------------
+
+        if (
+            element.name == "p"
+            and current_skill
+        ):
 
             text = clean_text(
                 element.get_text(
@@ -638,111 +799,77 @@ def get_section(soup, section_name):
             )
 
             if text:
-                content.append(text)
 
-    if not content:
-        return None
+                current_skill[
+                    "description"
+                ] += " " + text
 
-    return content
+    # Save final skill
+    if current_skill:
+        skills.append(
+            current_skill
+        )
 
+    for skill in skills:
 
-# ============================================================
-# GET HERO DATA
-# ============================================================
+        skill["description"] = clean_text(
+            skill["description"]
+        )
 
-async def get_hero_page(hero_name):
-
-    headers = {
-        "User-Agent": "HOK-Wiki-Discord-Bot/1.0"
-    }
-
-    api_url = (
-        "https://honor-of-kings.fandom.com/api.php"
+    print(
+        f"Found {len(skills)} skills "
+        f"for {hero_name}"
     )
 
-    timeout = aiohttp.ClientTimeout(total=30)
-
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        headers=headers
-    ) as session:
-
-        # Search for the hero
-        search_params = {
-            "action": "query",
-            "list": "search",
-            "srsearch": hero_name,
-            "format": "json",
-            "srlimit": 5
-        }
-
-        async with session.get(
-            api_url,
-            params=search_params
-        ) as response:
-
-            if response.status != 200:
-                print(
-                    f"Search failed: HTTP {response.status}"
-                )
-                return None
-
-            search_data = await response.json()
-
-        results = (
-            search_data
-            .get("query", {})
-            .get("search", [])
-        )
-
-        if not results:
-            print(
-                f"No wiki results for {hero_name}"
-            )
-            return None
-
-        page_title = results[0]["title"]
-
-        print(
-            f"Wiki page found: {page_title}"
-        )
-
-        # Get the actual wiki HTML through the API
-        page_params = {
-            "action": "parse",
-            "page": page_title,
-            "prop": "text",
-            "format": "json"
-        }
-
-        async with session.get(
-            api_url,
-            params=page_params
-        ) as response:
-
-            if response.status != 200:
-                print(
-                    f"API page failed: HTTP {response.status}"
-                )
-                return None
-
-            page_data = await response.json()
-
-        if "parse" not in page_data:
-            print(
-                "Wiki API did not return page content."
-            )
-            return None
-
-        html = (
-            page_data["parse"]["text"]["*"]
-        )
-
-        return html
+    return skills
 
 
 # ============================================================
-# EMBED TEXT HELPER
+# HERO DATA
+# ============================================================
+
+async def get_hero_data(
+    hero_name
+):
+
+    html = await get_hero_page(
+        hero_name
+    )
+
+    if not html:
+        return None
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    data = {
+
+        "background": get_section(
+            soup,
+            "Background"
+        ),
+
+        "lore": get_lore(
+            soup
+        ),
+
+        "skills": await get_skills(
+            hero_name,
+            html
+        ),
+
+        "strategies": get_strategies(
+            soup
+        )
+    }
+
+    return data
+
+
+# ============================================================
+# MAKE DISCORD PAGES
 # ============================================================
 
 def make_pages(
@@ -752,25 +879,33 @@ def make_pages(
 ):
 
     if not lines:
+
         return [
-            "No information was found on the wiki."
+            "No information was found "
+            "on the wiki."
         ]
 
     pages = []
+
     current = ""
 
     for line in lines:
 
-        # Remove excessive wiki text
-        line = clean_text(line)
+        line = clean_text(
+            line
+        )
 
         if not line:
             continue
 
-        # Add bullet
         line = "• " + line
 
-        if len(current) + len(line) + 1 > max_chars:
+        if (
+            len(current)
+            + len(line)
+            + 1
+            > max_chars
+        ):
 
             if current:
                 pages.append(
@@ -795,34 +930,84 @@ def make_pages(
 
 
 # ============================================================
-# INFORMATION VIEW
+# TENCENT SKIN SLIDESHOW
 # ============================================================
 
-class SkinSlideshow(discord.ui.View):
+class SkinView(discord.ui.View):
 
-    def __init__(self, hero_name, skins):
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        hero,
+        timeout=300
+    ):
 
-        self.hero_name = hero_name
-        self.skins = skins
+        super().__init__(
+            timeout=timeout
+        )
+
+        self.hero = hero
+
+        self.skins = hero.get(
+            "skins",
+            []
+        )
+
         self.current_skin = 0
 
     def create_embed(self):
 
-        skin_url = self.skins[self.current_skin]
+        if not self.skins:
 
-        embed = discord.Embed(
-            title=f"{self.hero_name} — Skins",
-            description=(
-                f"Skin {self.current_skin + 1} "
-                f"of {len(self.skins)}"
+            return discord.Embed(
+                title=(
+                    f"{self.hero.get('global', 'Hero')} "
+                    f"— Skins"
+                ),
+                description="No skins found."
+            )
+
+        skin = self.skins[
+            self.current_skin
+        ]
+
+        hero_name = self.hero.get(
+            "global",
+            self.hero.get(
+                "cn",
+                "Hero"
             )
         )
 
-        embed.set_image(url=skin_url)
+        skin_name = skin.get(
+            "cn",
+            f"Skin {self.current_skin + 1}"
+        )
+
+        image_url = skin.get(
+            "image"
+        )
+
+        embed = discord.Embed(
+            title=(
+                f"✨ {hero_name} — {skin_name}"
+            ),
+            description=(
+                f"Skin "
+                f"{self.current_skin + 1}"
+                f"/{len(self.skins)}"
+            )
+        )
+
+        if image_url:
+            embed.set_image(
+                url=image_url
+            )
 
         embed.set_footer(
-            text="Honor of Kings Wiki • Skin Slideshow"
+            text=(
+                "Honor of Kings • "
+                "Tencent Skin Slideshow"
+            )
         )
 
         return embed
@@ -837,10 +1022,17 @@ class SkinSlideshow(discord.ui.View):
         button: discord.ui.Button
     ):
 
+        if not self.skins:
+            await interaction.response.defer()
+            return
+
         self.current_skin -= 1
 
         if self.current_skin < 0:
-            self.current_skin = len(self.skins) - 1
+
+            self.current_skin = (
+                len(self.skins) - 1
+            )
 
         await interaction.response.edit_message(
             embed=self.create_embed(),
@@ -857,173 +1049,36 @@ class SkinSlideshow(discord.ui.View):
         button: discord.ui.Button
     ):
 
+        if not self.skins:
+            await interaction.response.defer()
+            return
+
         self.current_skin += 1
 
-        if self.current_skin >= len(self.skins):
+        if (
+            self.current_skin
+            >= len(self.skins)
+        ):
+
             self.current_skin = 0
 
         await interaction.response.edit_message(
             embed=self.create_embed(),
             view=self
         )
-async def get_skills(hero_name, html):
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
 
-    skills = []
+# ============================================================
+# LORE VIEW
+# ============================================================
 
-    # Find the EXACT "Skills [ ]" heading
-    skills_heading = None
-
-    for heading in soup.find_all(["h2", "h3"]):
-
-        title = clean_text(
-            heading.get_text(" ", strip=True)
-        )
-
-        title = title.replace("[edit]", "")
-        title = title.replace("[ ]", "")
-        title = title.strip()
-
-        if title.lower() == "skills":
-            skills_heading = heading
-            break
-
-    if not skills_heading:
-        print("Skills heading not found")
-        return []
-
-    current_skill = None
-
-    for element in skills_heading.find_all_next():
-
-        # ------------------------------------------------
-        # Stop when Skills section ends
-        # ------------------------------------------------
-
-        if element.name == "h2":
-
-            title = clean_text(
-                element.get_text(" ", strip=True)
-            )
-
-            title = title.replace("[edit]", "")
-            title = title.replace("[ ]", "")
-            title = title.strip().lower()
-
-            if title in [
-                "skins",
-                "partner and counter",
-                "strategies"
-            ]:
-                break
-
-        # ------------------------------------------------
-        # Skill name
-        # ------------------------------------------------
-
-        if element.name == "h3":
-
-            name = clean_text(
-                element.get_text(" ", strip=True)
-            )
-
-            if not name:
-                continue
-
-            # Save previous skill
-            if current_skill:
-                skills.append(current_skill)
-
-            current_skill = {
-                "name": name,
-                "description": "",
-                "image": None
-            }
-
-            continue
-
-        # ------------------------------------------------
-        # Skill image
-        # ------------------------------------------------
-
-        if element.name == "img" and current_skill:
-
-            src = (
-                element.get("data-src")
-                or element.get("src")
-            )
-
-            if not src:
-                continue
-
-            filename = src.split("/")[-1]
-            filename = filename.split("?")[0]
-
-            name_without_ext = filename.rsplit(
-                ".",
-                1
-            )[0]
-
-            # Skill images are numbered
-            if name_without_ext.isdigit():
-
-                if "/revision/latest/" in src:
-
-                    src = src.split(
-                        "/revision/latest/"
-                    )[0] + "/revision/latest"
-
-                current_skill["image"] = src
-
-        # ------------------------------------------------
-        # Skill description
-        # ------------------------------------------------
-
-        if element.name == "p" and current_skill:
-
-            text = clean_text(
-                element.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            if text:
-                current_skill["description"] += (
-                    " " + text
-                )
-
-    # Save last skill
-    if current_skill:
-        skills.append(current_skill)
-
-    # Clean descriptions
-    for skill in skills:
-
-        skill["description"] = clean_text(
-            skill["description"]
-        )
-
-    print(
-        f"Found {len(skills)} skills for {hero_name}"
-    )
-
-    for skill in skills:
-
-        print(
-            skill["name"],
-            "|",
-            skill["image"]
-        )
-
-    return skills
 class LoreView(discord.ui.View):
 
-    def __init__(self, hero_name, pages):
+    def __init__(
+        self,
+        hero_name,
+        pages
+    ):
 
         super().__init__(
             timeout=300
@@ -1036,14 +1091,19 @@ class LoreView(discord.ui.View):
     def create_embed(self):
 
         embed = discord.Embed(
-            title=f"{self.hero_name} — Lore",
-            description=self.pages[self.page]
+            title=(
+                f"{self.hero_name} — Lore"
+            ),
+            description=self.pages[
+                self.page
+            ]
         )
 
         embed.set_footer(
             text=(
                 f"Honor of Kings Wiki • "
-                f"Page {self.page + 1}/{len(self.pages)}"
+                f"Page {self.page + 1}/"
+                f"{len(self.pages)}"
             )
         )
 
@@ -1062,7 +1122,10 @@ class LoreView(discord.ui.View):
         self.page -= 1
 
         if self.page < 0:
-            self.page = len(self.pages) - 1
+
+            self.page = (
+                len(self.pages) - 1
+            )
 
         await interaction.response.edit_message(
             embed=self.create_embed(),
@@ -1081,7 +1144,11 @@ class LoreView(discord.ui.View):
 
         self.page += 1
 
-        if self.page >= len(self.pages):
+        if (
+            self.page
+            >= len(self.pages)
+        ):
+
             self.page = 0
 
         await interaction.response.edit_message(
@@ -1089,9 +1156,18 @@ class LoreView(discord.ui.View):
             view=self
         )
 
+
+# ============================================================
+# SKILL VIEW
+# ============================================================
+
 class SkillView(discord.ui.View):
 
-    def __init__(self, hero_name, skills):
+    def __init__(
+        self,
+        hero_name,
+        skills
+    ):
 
         super().__init__(
             timeout=300
@@ -1113,12 +1189,16 @@ class SkillView(discord.ui.View):
                 f"{skill['name']}"
             ),
             description=(
-                skill["description"]
+                skill.get(
+                    "description",
+                    ""
+                )
                 or "No description found."
             )
         )
 
         if skill.get("image"):
+
             embed.set_image(
                 url=skill["image"]
             )
@@ -1147,6 +1227,7 @@ class SkillView(discord.ui.View):
         self.current_skill -= 1
 
         if self.current_skill < 0:
+
             self.current_skill = (
                 len(self.skills) - 1
             )
@@ -1168,19 +1249,32 @@ class SkillView(discord.ui.View):
 
         self.current_skill += 1
 
-        if self.current_skill >= len(self.skills):
+        if (
+            self.current_skill
+            >= len(self.skills)
+        ):
+
             self.current_skill = 0
 
         await interaction.response.edit_message(
             embed=self.create_embed(),
             view=self
         )
-class HeroInfoView(discord.ui.View):
+
+
+# ============================================================
+# HERO INFO VIEW
+# ============================================================
+
+class HeroInfoView(
+    discord.ui.View
+):
 
     def __init__(
         self,
         hero_name,
-        data
+        data,
+        hero
     ):
 
         super().__init__(
@@ -1189,9 +1283,7 @@ class HeroInfoView(discord.ui.View):
 
         self.hero_name = hero_name
         self.data = data
-
-        self.page = 0
-        self.pages = []
+        self.hero = hero
 
     async def show_section(
         self,
@@ -1201,68 +1293,70 @@ class HeroInfoView(discord.ui.View):
     ):
 
         lines = self.data.get(
-            section_name
+            section_name,
+            []
         )
 
-        self.pages = make_pages(
+        pages = make_pages(
             title,
             lines
         )
 
-        self.page = 0
-
         embed = discord.Embed(
-            title=f"{self.hero_name} — {title}",
-            description=self.pages[0]
+            title=(
+                f"{self.hero_name} — "
+                f"{title}"
+            ),
+            description=pages[0]
         )
 
         embed.set_footer(
             text=(
                 f"Honor of Kings Wiki • "
-                f"Page 1/{len(self.pages)}"
+                f"Page 1/{len(pages)}"
             )
         )
 
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self
-        )
+        # If multiple pages, use a page view
+        if len(pages) > 1:
+
+            view = SectionView(
+                self.hero_name,
+                title,
+                pages
+            )
+
+            await interaction.response.edit_message(
+                embed=view.create_embed(),
+                view=view
+            )
+
+        else:
+
+            await interaction.response.edit_message(
+                embed=embed,
+                view=self
+            )
 
     # --------------------------------------------------------
     # BACKGROUND
     # --------------------------------------------------------
 
     @discord.ui.button(
-        label="✨ Skins",
-        style=discord.ButtonStyle.primary,
-        row=1
+        label="📖 Background",
+        style=discord.ButtonStyle.secondary,
+        row=0
     )
-    async def skins(
+    async def background(
         self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
+        interaction,
+        button
     ):
-        skin_images = self.data.get(
-            "skin_images",
-            []
-        )
 
-        if not skin_images:
-            await interaction.response.send_message(
-                f"❌ No skin images found for "
-                f"**{self.hero_name}**.",
-                ephemeral=True
-            )
-            return
-
-        slideshow = SkinSlideshow(
-            self.hero_name,
-            skin_images
-        )
-
-        await interaction.response.edit_message(
-            embed=slideshow.create_embed(),
-            view=slideshow
+        await self.show_section(
+            interaction,
+            "background",
+            "Background"
         )
 
     # --------------------------------------------------------
@@ -1306,6 +1400,7 @@ class HeroInfoView(discord.ui.View):
             embed=view.create_embed(),
             view=view
         )
+
     # --------------------------------------------------------
     # SKILLS
     # --------------------------------------------------------
@@ -1327,16 +1422,57 @@ class HeroInfoView(discord.ui.View):
         )
 
         if not skills:
+
             await interaction.response.send_message(
-                f"❌ No skill information found for "
-                f"**{self.hero_name}**.",
+                f"❌ No skill information found "
+                f"for **{self.hero_name}**.",
                 ephemeral=True
             )
+
             return
 
         view = SkillView(
             self.hero_name,
             skills
+        )
+
+        await interaction.response.edit_message(
+            embed=view.create_embed(),
+            view=view
+        )
+
+    # --------------------------------------------------------
+    # SKINS
+    # --------------------------------------------------------
+
+    @discord.ui.button(
+        label="✨ Skins",
+        style=discord.ButtonStyle.primary,
+        row=1
+    )
+    async def skins(
+        self,
+        interaction,
+        button
+    ):
+
+        skins = self.hero.get(
+            "skins",
+            []
+        )
+
+        if not skins:
+
+            await interaction.response.send_message(
+                f"❌ No Tencent skins found "
+                f"for **{self.hero_name}**.",
+                ephemeral=True
+            )
+
+            return
+
+        view = SkinView(
+            self.hero
         )
 
         await interaction.response.edit_message(
@@ -1367,15 +1503,111 @@ class HeroInfoView(discord.ui.View):
 
 
 # ============================================================
-# BACK BUTTON
+# SECTION PAGE VIEW
 # ============================================================
 
-class BackView(discord.ui.View):
+class SectionView(
+    discord.ui.View
+):
 
     def __init__(
         self,
         hero_name,
-        data
+        title,
+        pages
+    ):
+
+        super().__init__(
+            timeout=300
+        )
+
+        self.hero_name = hero_name
+        self.title = title
+        self.pages = pages
+        self.page = 0
+
+    def create_embed(self):
+
+        embed = discord.Embed(
+            title=(
+                f"{self.hero_name} — "
+                f"{self.title}"
+            ),
+            description=self.pages[
+                self.page
+            ]
+        )
+
+        embed.set_footer(
+            text=(
+                f"Honor of Kings Wiki • "
+                f"Page {self.page + 1}/"
+                f"{len(self.pages)}"
+            )
+        )
+
+        return embed
+
+    @discord.ui.button(
+        label="◀ Previous",
+        style=discord.ButtonStyle.secondary
+    )
+    async def previous(
+        self,
+        interaction,
+        button
+    ):
+
+        self.page -= 1
+
+        if self.page < 0:
+            self.page = (
+                len(self.pages) - 1
+            )
+
+        await interaction.response.edit_message(
+            embed=self.create_embed(),
+            view=self
+        )
+
+    @discord.ui.button(
+        label="▶ Next",
+        style=discord.ButtonStyle.primary
+    )
+    async def next(
+        self,
+        interaction,
+        button
+    ):
+
+        self.page += 1
+
+        if (
+            self.page
+            >= len(self.pages)
+        ):
+
+            self.page = 0
+
+        await interaction.response.edit_message(
+            embed=self.create_embed(),
+            view=self
+        )
+
+
+# ============================================================
+# BACK TO HERO
+# ============================================================
+
+class BackView(
+    discord.ui.View
+):
+
+    def __init__(
+        self,
+        hero_name,
+        data,
+        hero
     ):
 
         super().__init__(
@@ -1384,6 +1616,7 @@ class BackView(discord.ui.View):
 
         self.hero_name = hero_name
         self.data = data
+        self.hero = hero
 
     @discord.ui.button(
         label="◀ Back to Hero",
@@ -1396,8 +1629,12 @@ class BackView(discord.ui.View):
     ):
 
         embed = discord.Embed(
-            title=f"⚔️ {self.hero_name}",
-            description="Select a category below."
+            title=(
+                f"⚔️ {self.hero_name}"
+            ),
+            description=(
+                "Select a category below."
+            )
         )
 
         embed.add_field(
@@ -1414,13 +1651,13 @@ class BackView(discord.ui.View):
 
         embed.add_field(
             name="⚔️ Skills",
-            value="Hero skills",
+            value="Hero abilities",
             inline=True
         )
 
         embed.add_field(
             name="✨ Skins",
-            value="Hero skins",
+            value="Tencent skins",
             inline=True
         )
 
@@ -1434,7 +1671,8 @@ class BackView(discord.ui.View):
             embed=embed,
             view=HeroInfoView(
                 self.hero_name,
-                self.data
+                self.data,
+                self.hero
             )
         )
 
@@ -1445,27 +1683,65 @@ class BackView(discord.ui.View):
 
 @bot.tree.command(
     name="hero",
-    description="View information about a Honor of Kings hero"
+    description=(
+        "View information about a "
+        "Honor of Kings hero"
+    )
 )
 async def hero(
     interaction: discord.Interaction,
     hero_name: str
 ):
+
     await interaction.response.defer()
 
-    print(f"Searching wiki for: {hero_name}")
+    print(
+        f"Searching hero: {hero_name}"
+    )
 
-    data = await get_hero_data(hero_name)
+    # Find hero in local database
+    hero = find_hero(
+        hero_name
+    )
+
+    if not hero:
+
+        await interaction.followup.send(
+            f"❌ I couldn't find "
+            f"**{hero_name}** in the hero database."
+        )
+
+        return
+
+    display_name = hero.get(
+        "global",
+        hero.get(
+            "cn",
+            hero_name
+        )
+    )
+
+    # Get wiki information
+    data = await get_hero_data(
+        display_name
+    )
 
     if not data:
+
         await interaction.followup.send(
-            f"❌ I couldn't find information for **{hero_name}**."
+            f"❌ I found **{display_name}** "
+            f"in the database, but couldn't "
+            f"load the wiki information."
         )
+
         return
 
     embed = discord.Embed(
-        title=f"⚔️ {hero_name}",
-        description="Choose a category below."
+        title=f"⚔️ {display_name}",
+        description=(
+            f"**{hero.get('cn', '')}**\n\n"
+            "Choose a category below."
+        )
     )
 
     embed.add_field(
@@ -1488,7 +1764,7 @@ async def hero(
 
     embed.add_field(
         name="✨ Skins",
-        value="Hero skins",
+        value="Tencent skins",
         inline=True
     )
 
@@ -1499,8 +1775,9 @@ async def hero(
     )
 
     view = HeroInfoView(
-        hero_name,
-        data
+        display_name,
+        data,
+        hero
     )
 
     await interaction.followup.send(
@@ -1510,26 +1787,179 @@ async def hero(
 
 
 # ============================================================
-# READY + SYNC
+# /SKINS
+# ============================================================
+
+@bot.tree.command(
+    name="skins",
+    description="View a hero's Tencent skins"
+)
+async def skins(
+    interaction: discord.Interaction,
+    hero_name: str
+):
+
+    hero = find_hero(
+        hero_name
+    )
+
+    if not hero:
+
+        await interaction.response.send_message(
+            f"❌ Hero **{hero_name}** "
+            f"was not found."
+        )
+
+        return
+
+    skin_list = hero.get(
+        "skins",
+        []
+    )
+
+    if not skin_list:
+
+        await interaction.response.send_message(
+            f"❌ No skins found for "
+            f"**{hero.get('global', hero_name)}**."
+        )
+
+        return
+
+    view = SkinView(
+        hero
+    )
+
+    await interaction.response.send_message(
+        embed=view.create_embed(),
+        view=view
+    )
+
+
+# ============================================================
+# /HEROES
+# ============================================================
+
+@bot.tree.command(
+    name="heroes",
+    description="List all Honor of Kings heroes"
+)
+async def heroes_command(
+    interaction: discord.Interaction
+):
+
+    if not heroes:
+
+        await interaction.response.send_message(
+            "❌ heroes.json is empty."
+        )
+
+        return
+
+    names = []
+
+    for hero in heroes:
+
+        global_name = hero.get(
+            "global"
+        )
+
+        cn_name = hero.get(
+            "cn"
+        )
+
+        if global_name and cn_name:
+
+            names.append(
+                f"• **{global_name}** — {cn_name}"
+            )
+
+        elif global_name:
+
+            names.append(
+                f"• **{global_name}**"
+            )
+
+    # Discord message limit
+    chunks = []
+    current = ""
+
+    for name in names:
+
+        if (
+            len(current)
+            + len(name)
+            + 1
+            > 3800
+        ):
+
+            chunks.append(
+                current
+            )
+
+            current = name
+
+        else:
+
+            if current:
+                current += "\n"
+
+            current += name
+
+    if current:
+        chunks.append(
+            current
+        )
+
+    embed = discord.Embed(
+        title="⚔️ Honor of Kings Heroes",
+        description=chunks[0]
+    )
+
+    embed.set_footer(
+        text=(
+            f"{len(heroes)} heroes "
+            "in database"
+        )
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+    # Send additional pages if needed
+    for chunk in chunks[1:]:
+
+        await interaction.followup.send(
+            chunk
+        )
+
+
+# ============================================================
+# READY
 # ============================================================
 
 @bot.event
 async def on_ready():
+
+    print(
+        f"Logged in as {bot.user}"
+    )
+
+    # Update Tencent skins
+    await update_skins()
+
+    # Reload after update
+    global heroes
+    heroes = load_heroes()
 
     try:
 
         synced = await bot.tree.sync()
 
         print(
-            f"Logged in as {bot.user}"
-        )
-
-        print(
-            f"Synced {len(synced)} slash command(s)."
-        )
-
-        print(
-            "Bot is ready!"
+            f"Synced {len(synced)} "
+            "slash command(s)."
         )
 
     except Exception as error:
@@ -1538,9 +1968,22 @@ async def on_ready():
             f"Command sync error: {error}"
         )
 
+    print(
+        "Bot is ready!"
+    )
+
 
 # ============================================================
 # RUN
 # ============================================================
 
-bot.run(TOKEN)
+if not TOKEN:
+
+    print(
+        "ERROR: TOKEN environment variable "
+        "is not set."
+    )
+
+else:
+
+    bot.run(TOKEN)
