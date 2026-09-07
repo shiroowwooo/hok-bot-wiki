@@ -14,7 +14,10 @@ from bs4 import BeautifulSoup
 # CONFIG
 # ============================================================
 
-TOKEN = ("MTU0NDcyMzI3Mzk2MTQzOTIzMg.GxRpgR.AN7C7AyiuxwmPaxM11-OlInZW4v3yiv1651Png")
+TOKEN = os.getenv("TOKEN")
+
+MEDIA_API = "https://media-library-api.vincentpatayan88.workers.dev"
+ADMIN_DISCORD_ID = 820945208853266442
 
 HEROES_FILE = "heroes.json"
 
@@ -25,6 +28,7 @@ TENCENT_HERO_LIST = (
 FANDOM_API = (
     "https://honor-of-kings.fandom.com/api.php"
 )
+
 
 
 # ============================================================
@@ -38,6 +42,54 @@ bot = commands.Bot(
     intents=intents
 )
 
+
+
+@bot.tree.command(name="setpassword", description="Change the Media Library website password")
+async def setpassword(interaction: discord.Interaction, password: str):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        await interaction.response.send_message("You are not authorized.", ephemeral=True)
+        return
+
+    if len(password) < 8 or len(password) > 200:
+        await interaction.response.send_message("Password must be 8-200 characters.", ephemeral=True)
+        return
+
+    secret = os.getenv("MEDIA_ADMIN_SECRET")
+    if not secret:
+        await interaction.response.send_message("Admin secret is not configured.", ephemeral=True)
+        return
+
+    headers = {
+        "X-Media-Admin-Secret": secret,
+        "X-Discord-User-ID": str(interaction.user.id),
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{MEDIA_API}/api/admin/password",
+                json={"password": password},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                data = await response.json(content_type=None)
+
+        if response.status == 200 and data.get("ok"):
+            await interaction.response.send_message(
+                "✅ Media Library password changed.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Failed to change password: {data.get('error', 'Unknown error')}",
+                ephemeral=True,
+            )
+
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Could not contact Media Library: {type(e).__name__}",
+            ephemeral=True,
+        )
 
 # ============================================================
 # LOAD HERO DATABASE
