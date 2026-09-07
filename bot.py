@@ -42,22 +42,33 @@ bot = commands.Bot(
     intents=intents
 )
 
-
-
 @bot.tree.command(name="setpassword", description="Change the Media Library website password")
 async def setpassword(interaction: discord.Interaction, password: str):
     if interaction.user.id != ADMIN_DISCORD_ID:
-        await interaction.response.send_message("You are not authorized.", ephemeral=True)
+        await interaction.response.send_message(
+            "You are not authorized.",
+            ephemeral=True
+        )
         return
 
     if len(password) < 8 or len(password) > 200:
-        await interaction.response.send_message("Password must be 8-200 characters.", ephemeral=True)
+        await interaction.response.send_message(
+            "Password must be 8-200 characters.",
+            ephemeral=True
+        )
         return
 
     secret = os.getenv("MEDIA_ADMIN_SECRET")
+
     if not secret:
-        await interaction.response.send_message("Admin secret is not configured.", ephemeral=True)
+        await interaction.response.send_message(
+            "Admin secret is not configured.",
+            ephemeral=True
+        )
         return
+
+    # Acknowledge Discord immediately
+    await interaction.response.defer(ephemeral=True)
 
     headers = {
         "X-Media-Admin-Secret": secret,
@@ -75,20 +86,20 @@ async def setpassword(interaction: discord.Interaction, password: str):
                 data = await response.json(content_type=None)
 
         if response.status == 200 and data.get("ok"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ Media Library password changed.",
-                ephemeral=True,
+                ephemeral=True
             )
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ Failed to change password: {data.get('error', 'Unknown error')}",
-                ephemeral=True,
+                ephemeral=True
             )
 
     except Exception as e:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"❌ Could not contact Media Library: {type(e).__name__}",
-            ephemeral=True,
+            ephemeral=True
         )
 
 # ============================================================
